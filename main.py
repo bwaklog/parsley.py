@@ -88,6 +88,8 @@ class PageType(Enum):
     InteriorIndex = 0x02
     InteriorTable = 0x05
 
+    OverflowPage = 0xFF
+
 
 class PageHeader:
     def __init__(self, content: Bytes, first: bool = False) -> None:
@@ -111,6 +113,10 @@ class PageHeader:
         elif pgtype == 0x0D:
             self.pgtype = PageType.LeafTable
             self.cp_base = base + 8
+        else:
+            self.pgtype = PageType.OverflowPage
+            self.next_page = content.read(base + 0, 4)
+            return
 
         self.freeblock = content.read(base + 1, 2)
         self.cells = content.read(base + 3, 2)
@@ -130,7 +136,7 @@ class PageHeader:
 
 class Cell:
     def __init__(
-        self, pgsize: int, pgtype: PageType, content: Bytes, coffset: int
+        self, pgsize: int, pgtype: PageType, content: Bytes, coffset: int = 0
     ) -> None:
         bcontent = content.read_bytes_to_end()
         self.pgtype = pgtype
@@ -189,9 +195,14 @@ class Cell:
                 # first page of the overflow page list
                 self.overflow_page_no = content.read(offset, 4)
 
+        elif pgtype == PageType.OverflowPage:
+            self.payload = content.to_bytes(coffset + 4, pgsize)
+
     def get_payload(self) -> bytes | None:
         if self.pgtype == PageType.InteriorTable:
             return None
+        elif self.pgtype == PageType.OverflowPage:
+            return self.payload
         else:
             return self.payload
 
@@ -207,16 +218,22 @@ class Page:
         else:
             self.header = PageHeader(self.__content)
 
-        cp_arr = content.to_bytes(self.header.cp_base, self.header.cells * 2)
-
-        self.cell_ptrs = list(
-            map(
-                lambda x: Bytes(bytes(x)).read_to_end(),
-                zip(cp_arr[::2], cp_arr[1::2]),
+        if self.header.pgtype != PageType.OverflowPage:
+            cp_arr = content.to_bytes(self.header.cp_base, self.header.cells * 2)
+            self.cell_ptrs = list(
+                map(
+                    lambda x: Bytes(bytes(x)).read_to_end(),
+                    zip(cp_arr[::2], cp_arr[1::2]),
+                )
             )
-        )
 
-    def get_cell(self, cell_id: int) -> None | Cell:
+    def get_cell(self, cell_id: int = 1) -> None | Cell:
+        if self.header.pgtype == PageType.OverflowPage:
+            return Cell(
+                self.pgsize,
+                self.header.pgtype,
+                self.__content,
+            )
         if cell_id - 1 < self.header.cells:
             return Cell(
                 self.pgsize,
@@ -291,15 +308,24 @@ def main():
         if page is None:
             continue
 
-        print(f"[page {page.pgno}] {page.header.pgtype} with cells {page.header.cells}")
+        if page.header.pgtype != PageType.OverflowPage:
+            print(
+                f"[page {page.pgno}] {page.header.pgtype} with cells {page.header.cells}"
+            )
+            for i, _ in enumerate(page.cell_ptrs):
+                cell = page.get_cell(i + 1)
 
-        for i, _ in enumerate(page.cell_ptrs):
-            cell = page.get_cell(i + 1)
+                if cell is None:
+                    continue
 
-            if cell is None:
-                continue
-
-            print(f"\t[cell {i + 1}] {cell.get_payload()}")
+                print(f"\t[cell {i + 1}] {cell.get_payload()}")
+        else:
+            print(
+                f"[page {page.pgno}] {page.header.pgtype} with next_page {page.header.next_page}"
+            )
+            cell = page.get_cell()
+            if cell is not None:
+                print(f"\t[payload] {cell.get_payload()}")
 
 
 if __name__ == "__main__":
